@@ -219,6 +219,9 @@ func (s *server) handleInvoice(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Cents int64 `json:"cents"`
+		// RemainingCents is this part plus every unpaid part after it, so a
+		// split bill is refused up front rather than half-way through.
+		RemainingCents int64 `json:"remaining_cents"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -228,6 +231,9 @@ func (s *server) handleInvoice(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest,
 			fmt.Errorf("amount must be between 0.01 and %d", maxCents/100))
 		return
+	}
+	if req.RemainingCents < req.Cents {
+		req.RemainingCents = req.Cents
 	}
 
 	cur := s.rate.currency
@@ -252,10 +258,14 @@ func (s *server) handleInvoice(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, err)
 		return
 	}
-	if held+sats > s.maxBalance {
+	remainingSats := int64(math.Round(float64(req.RemainingCents) / 100 / price * 1e8))
+	if held+remainingSats > s.maxBalance {
+		room := max(s.maxBalance-held, 0)
+		roomCents := int64(float64(room) / 1e8 * price * 100)
 		writeErr(w, http.StatusConflict, fmt.Errorf(
-			"wallet nearly full (%d sats), wait a few minutes for the sweep",
-			held))
+			"bill too big for the wallet right now: max %d.%02d %s "+
+				"(a sweep frees up room every few minutes)",
+			roomCents/100, roomCents%100, cur))
 		return
 	}
 

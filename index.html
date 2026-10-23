@@ -156,7 +156,8 @@ async function startPart() {
   try {
     const r = await fetch('/api/invoice', { method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cents: amt }) });
+      body: JSON.stringify({ cents: amt,
+        remaining_cents: parts.slice(part).reduce((a, b) => a + b, 0) }) });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || 'failed');
     const split = parts.length > 1;
