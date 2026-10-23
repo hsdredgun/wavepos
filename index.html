@@ -40,6 +40,7 @@
   #invoice .big { height: 60px; }
   #qr { width: min(80vw, 52vh, 520px); aspect-ratio: 1; background: #fff;
     border-radius: 16px; padding: 12px; }
+  #qr { cursor: pointer; }
   #inv-amount { font-size: 44px; font-weight: 700; }
   #paid { background: var(--ok); }
   #paid .tick { font-size: 160px; line-height: 1; }
@@ -72,8 +73,9 @@
   <div class="sub" id="inv-part"></div>
   <div id="inv-amount"></div>
   <div class="sub" id="inv-sats"></div>
-  <img id="qr" alt="Lightning invoice QR">
-  <div class="sub" id="inv-state">Scan with any Lightning wallet</div>
+  <img id="qr" alt="Lightning invoice QR" title="Tap to copy the invoice">
+  <div class="sub" id="inv-state">Scan with any Lightning wallet · tap the QR to copy</div>
+  <button class="big" id="retry" hidden>Retry this payment</button>
   <button class="big ghost" id="cancel">Cancel</button>
 </section>
 
@@ -86,7 +88,11 @@
 
 <script>
 let cents = 0, rate = 0, currency = 'AUD', maxInvoiceSats = 50000;
-let poll = null, deadline = 0, busy = false;
+let deadline = 0, busy = false, invoice = '';
+// pollGen identifies the current status poll. Bumping it abandons the old
+// poll, including any check still in flight, so a late answer for an old
+// invoice can never count as a payment for the current one.
+let pollGen = 0;
 // A bill too big for one invoice is split into parts paid one after another.
 let parts = [], part = 0, paidCents = 0;
 const $ = id => document.getElementById(id);
@@ -155,6 +161,7 @@ $('charge').addEventListener('click', async () => {
 // startPart creates the invoice for the current part and starts polling.
 async function startPart() {
   const amt = parts[part];
+  $('retry').hidden = true;
   try {
     const r = await fetch('/api/invoice', { method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -176,52 +183,93 @@ async function startPart() {
     $('inv-amount').textContent = fmt(amt) + ' ' + currency;
     $('inv-sats').textContent = j.sats.toLocaleString() + ' sats';
     $('qr').src = j.qr;
-    $('inv-state').textContent = 'Scan with any Lightning wallet';
+    invoice = j.invoice;
+    $('inv-state').textContent = 'Scan with any Lightning wallet · tap the QR to copy';
     deadline = Date.now() + 15 * 60 * 1000;
     startPoll(j.id);
     return true;
   } catch (e) {
-    // Mid-bill the invoice screen is showing, so report the error there.
+    // Mid-bill the invoice screen is showing, so report the error there and
+    // let staff retry this part without losing what's already been paid.
     $('err').textContent = e.message;
     $('inv-state').textContent = e.message;
+    $('retry').hidden = false;
     return false;
   }
 }
 
+// startPoll checks the invoice one request at a time until it settles.
 function startPoll(id) {
-  stopPoll();
-  poll = setInterval(async () => {
+  const gen = ++pollGen;
+  const tick = async () => {
+    if (gen !== pollGen) return;
     if (Date.now() > deadline) {
       stopPoll();
-      $('inv-state').textContent = 'Invoice expired — cancel and try again';
+      $('inv-state').textContent = 'Invoice expired';
+      $('retry').hidden = false;
       return;
     }
+    let s = null;
     try {
       const r = await fetch('/api/status?id=' + encodeURIComponent(id));
-      if (!r.ok) return;
-      const s = (await r.json()).status;
-      if (s === 'paid') {
-        stopPoll();
-        paidCents += parts[part];
-        part++;
-        if (part < parts.length) {
-          $('inv-state').textContent = 'Paid ✓ — next QR coming…';
-          if (!(await startPart())) return;
-        } else {
-          $('paid-amount').textContent = fmt(cents) + ' ' + currency;
-          show('paid');
-        }
-      } else if (s === 'failed') {
-        stopPoll();
-        $('inv-state').textContent = 'Payment failed — cancel and try again';
-      }
+      if (r.ok) s = (await r.json()).status;
     } catch (e) {}
-  }, 1500);
+    if (gen !== pollGen) return; // cancelled or moved on while waiting
+
+    if (s === 'paid') {
+      stopPoll();
+      paidCents += parts[part];
+      part++;
+      if (part < parts.length) {
+        $('inv-state').textContent = 'Paid ✓ — next QR coming…';
+        await startPart();
+      } else {
+        $('paid-amount').textContent = fmt(cents) + ' ' + currency;
+        show('paid');
+      }
+    } else if (s === 'failed') {
+      stopPoll();
+      $('inv-state').textContent = 'Payment failed';
+      $('retry').hidden = false;
+    } else {
+      setTimeout(tick, 1500);
+    }
+  };
+  setTimeout(tick, 1500);
 }
 
-function stopPoll() { if (poll) clearInterval(poll); poll = null; }
+function stopPoll() { pollGen++; }
 
-function reset() { stopPoll(); cents = 0; parts = []; paidCents = 0; render(); show('keypad'); }
+// copyInvoice puts the invoice on the clipboard. navigator.clipboard needs
+// HTTPS, so plain-HTTP LAN access falls back to a hidden textarea.
+async function copyInvoice() {
+  if (!invoice) return;
+  let ok = false;
+  try {
+    await navigator.clipboard.writeText(invoice);
+    ok = true;
+  } catch (e) {
+    const t = document.createElement('textarea');
+    t.value = invoice;
+    t.style.position = 'fixed'; t.style.opacity = '0';
+    document.body.appendChild(t);
+    t.select();
+    try { ok = document.execCommand('copy'); } catch (e2) {}
+    t.remove();
+  }
+  const state = $('inv-state'), was = state.textContent;
+  const msg = ok ? 'Invoice copied ✓' : 'Copy failed — scan the QR instead';
+  state.textContent = msg;
+  setTimeout(() => { if (state.textContent === msg) state.textContent = was; }, 2000);
+}
+$('qr').addEventListener('click', copyInvoice);
+$('retry').addEventListener('click', startPart);
+
+function reset() {
+  stopPoll(); cents = 0; parts = []; paidCents = 0; invoice = '';
+  $('retry').hidden = true;
+  render(); show('keypad');
+}
 $('cancel').addEventListener('click', () => {
   if (paidCents && !confirm(`${fmt(paidCents)} of this bill is already paid. Cancel the rest?`)) return;
   reset();

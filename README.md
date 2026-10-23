@@ -78,9 +78,20 @@ When the operator raises the limits, change `-max-invoice-sats` and
 
 ## Full setup
 
-These steps assume Linux with systemd and `jq` (for the sweep script), run
-as root, for example in a dedicated container or VM. Adjust the `/root/...`
-paths if you run it as another user.
+These steps run as root, for example in a dedicated container or VM. Adjust
+the `/root/...` paths if you run it as another user.
+
+**You need:** Linux with systemd, `git`, `make`, Go 1.25.5+ (to build
+Wavelength), `jq` and `openssl`, plus a [Tailscale](https://tailscale.com/)
+account if you want the public HTTPS address from step 6.
+
+### 0. Get this repo
+
+The `contrib/` files used below come from here:
+
+```sh
+git clone https://github.com/hsdredgun/wavepos ~/wavepos
+```
 
 ### 1. Run Wavelength on mainnet
 
@@ -89,7 +100,11 @@ Build `waved` and `wavecli` (needs Go 1.25.5+; installs both to `~/go/bin`):
 ```sh
 git clone https://github.com/lightninglabs/wavelength && cd wavelength
 make install-wavewalletrpc
+echo 'export PATH="$PATH:$HOME/go/bin"' >> ~/.bashrc && source ~/.bashrc
 ```
+
+`waved` serves gRPC on `127.0.0.1:10029` (used by `wavecli`) and a REST
+gateway on `127.0.0.1:10031` (used by WavePos). Both are on by default.
 
 Create a wallet password file so `waved` can unlock itself after a reboot,
 then run it with the example service from this repo (adjust the path to your
@@ -135,17 +150,11 @@ chmod 600 /root/.waved/pos.macaroon
 
 Download a prebuilt binary from
 [Releases](https://github.com/hsdredgun/wavepos/releases) (Linux amd64 and
-arm64, checksums in `SHA256SUMS`), as in the quick start. You also want the
-repo for the `contrib/` files:
+arm64, checksums in `SHA256SUMS`), as in the quick start, or build it from
+your clone:
 
 ```sh
-git clone https://github.com/hsdredgun/wavepos && cd wavepos
-```
-
-Or build it yourself with Go 1.22+:
-
-```sh
-go build -o wavepos . && install -m 755 wavepos /usr/local/bin/wavepos
+cd ~/wavepos && go build -o wavepos . && install -m 755 wavepos /usr/local/bin/wavepos
 ```
 
 ### 4. Shop key (optional, recommended)
@@ -162,9 +171,13 @@ screen. Staff just tap the icon. Anyone without the key sees `Locked`.
 ### 5. Run it with systemd
 
 ```sh
-cp contrib/wavepos.service /etc/systemd/system/
+cp ~/wavepos/contrib/wavepos.service /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now wavepos
 ```
+
+The example service passes `-key-file /root/.wavepos-key`. If you skipped
+step 4, delete that line first, or WavePos stops at startup with
+`read key: no such file`.
 
 #### Changing settings
 
@@ -187,7 +200,7 @@ All flags:
 |---|---|---|
 | `-listen` | `127.0.0.1:8080` | Use `:8080` to also allow LAN access |
 | `-macaroon` | (required) | The receive-only macaroon |
-| `-currency` | `AUD` | Any code Coinbase/Kraken quote against BTC (USD, EUR, GBP…) |
+| `-currency` | `AUD` | A currency with cents that Coinbase/Kraken quote against BTC (USD, EUR, GBP…). Currencies without decimals, such as JPY or KRW, aren't supported yet |
 | `-memo` | empty | Prefix for the invoice memo. Payers can read it, so leave it empty if you'd rather not name your shop |
 | `-key-file` | empty | Shop key file; empty leaves the POS unlocked |
 | `-icon` | empty | Your logo as a PNG (180×180 works best), shown in the browser tab and as the home-screen icon |
@@ -220,10 +233,12 @@ lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file
 
 ### 7. Auto-sweep to cold storage
 
-Edit `ADDR` (and the thresholds, if you like) in `contrib/wave-sweep.sh`,
-then run:
+Edit the settings at the top of `contrib/wave-sweep.sh`: `ADDR` (your
+cold-storage address, required), the thresholds if you like, and `D` /
+`WAVECLI` if your `waved` data or `wavecli` live somewhere else. Then run:
 
 ```sh
+cd ~/wavepos
 install -m 755 contrib/wave-sweep.sh /usr/local/bin/wave-sweep.sh
 cp contrib/wave-sweep.service contrib/wave-sweep.timer /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now wave-sweep.timer
