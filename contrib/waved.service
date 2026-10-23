@@ -1,0 +1,19 @@
+[Unit]
+Description=Wavelength daemon (waved, mainnet)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# waved resolves ~/.waved from $HOME, which systemd doesn't set for root.
+Environment=HOME=/root
+ExecStart=/root/go/bin/waved \
+  --network=mainnet \
+  --allow-mainnet \
+  --wallet.type=lwwallet \
+  --wallet.password_file=/root/.waved/mainnet-password.txt \
+  --rpc.listenaddr=127.0.0.1:10029
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

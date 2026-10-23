@@ -78,20 +78,43 @@ When the operator raises the limits, change `-max-invoice-sats` and
 
 ## Full setup
 
-These steps assume Linux with systemd and `jq` (for the sweep script).
+These steps assume Linux with systemd and `jq` (for the sweep script), run
+as root, for example in a dedicated container or VM. Adjust the `/root/...`
+paths if you run it as another user.
 
 ### 1. Run Wavelength on mainnet
 
-Build `waved` and `wavecli` from
-[lightninglabs/wavelength](https://github.com/lightninglabs/wavelength)
-(`make install-wavewalletrpc`). Run `waved` with `--network=mainnet
---allow-mainnet --wallet.type=lwwallet`, create a wallet with `wavecli create`,
-and write the seed down on paper.
+Build `waved` and `wavecli` (needs Go 1.25.5+; installs both to `~/go/bin`):
+
+```sh
+git clone https://github.com/lightninglabs/wavelength && cd wavelength
+make install-wavewalletrpc
+```
+
+Create a wallet password file so `waved` can unlock itself after a reboot,
+then run it with the example service from this repo (adjust the path to your
+`wavepos` clone):
+
+```sh
+mkdir -p /root/.waved
+(umask 077; openssl rand -base64 32 > /root/.waved/mainnet-password.txt)
+cp ~/wavepos/contrib/waved.service /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now waved
+```
+
+Create the wallet. It prints a 24-word seed **once**: write it down on
+paper. It is an aezeed (LND-style) seed, not BIP39, so it only restores in
+Wavelength (`wavecli create --recover`), not in ordinary Bitcoin wallets.
+
+```sh
+wavecli create --wallet-password-file=/root/.waved/mainnet-password.txt
+```
 
 Mainnet is allowlisted. Run `wavecli getinfo` and submit your
 `identity_pubkey` through the access form linked from the
 [Networks & config](https://wavelength.lightning.engineering/concepts/networks-and-config/)
-docs.
+docs. A new seed means a new identity, so don't recreate the wallet after
+you've been approved.
 
 `waved` must stay running. It refreshes your VTXOs for free before their
 batch expires (in the operator's free refresh window). If it's offline for
@@ -214,6 +237,25 @@ testing.
 
 The sweep uses the admin macaroon and runs separately from the POS, so the
 web-facing process never holds spending rights.
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| Page says `Locked` | The link is missing `?k=<key>`. Open the full link once and re-add it to the home screen. |
+| Funnel address doesn't load ("server not found") | A new Funnel name can take up to half an hour to reach public DNS. Check with `dig +short <name>.ts.net @1.1.1.1`. Once that prints an IP, toggle the tablet's Wi-Fi to clear its cached "not found". |
+| `waved` won't start: `$HOME is not defined` | systemd doesn't set `HOME` for root services. Add `Environment=HOME=/root` (as in `contrib/waved.service`). |
+| `waved unreachable` on the till | `waved` is down or still locked. Check `systemctl status waved`, and that `--wallet.password_file` points at the right file. |
+| `No BTC/<currency> rate` | The machine can't reach Coinbase or Kraken, or neither quotes your currency code. |
+| "Bill too big for the wallet right now" | The bill plus the current balance would pass `max_user_balance`. Wait a few minutes for the sweep, or lower `THRESHOLD` in `wave-sweep.sh`. |
+| A small payment shows as credit, not balance | Normal below the operator's 1,000 sat VTXO floor. Credit turns into a VTXO once it passes 1,000. |
+| Sweep log says `not sweeping` | The exit fee was above your ppm limit. It retries every 2 minutes; the fee in ppm drops as the balance grows. |
+| After a power cut the POS stays down | The machine or container doesn't start on boot. On Proxmox: `pct set <id> --onboot 1`. Keep this on: `waved` must run to refresh your VTXOs before they expire. |
+
+Spending from the wallet by hand with `wavecli send`: the change must be
+either 0 or at least 1,000 sats, or the send fails before it starts. To
+empty the wallet over Lightning, size the invoice so the `--dry-run` shows
+`expected_total_outflow_sat` equal to your balance.
 
 ## License
 
