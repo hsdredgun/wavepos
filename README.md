@@ -54,8 +54,13 @@ Tablet browser ──HTTPS──> wavepos (Go, one binary) ──REST──> wav
 ```
 
 - **wavepos** serves the keypad page, converts fiat to sats (Coinbase, with
-  Kraken as fallback), asks `waved` for a Lightning invoice and polls it until
-  it's paid.
+  Kraken as fallback) and asks `waved` for Lightning invoices.
+- **The server owns each bill.** It splits the bill, creates every QR and
+  watches every QR it ever made for about an hour, including ones replaced
+  by "New QR", timed out or cancelled. If one of those gets paid anyway, the
+  till shows a red alert (customer overpaid, or a late payment on a cancelled
+  bill) instead of the money going unnoticed. A reload or a sleeping tablet
+  picks the bill up where it was.
 - Customers pay with **any Lightning wallet**. Payers who also use Wavelength
   settle directly inside Ark.
 - It runs with a **receive-only macaroon**: it can create invoices and read
@@ -175,9 +180,13 @@ cp ~/wavepos/contrib/wavepos.service /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now wavepos
 ```
 
-The example service passes `-key-file /root/.wavepos-key`. If you skipped
-step 4, delete that line first, or WavePos stops at startup with
-`read key: no such file`.
+If you made a shop key in step 4, add it to the `ExecStart=` line in
+`/etc/systemd/system/wavepos.service` (see "Changing settings" below):
+
+```
+  -currency AUD \
+  -key-file /root/.wavepos-key
+```
 
 #### Changing settings
 
@@ -257,6 +266,8 @@ web-facing process never holds spending rights.
 
 | Symptom | Cause and fix |
 |---|---|
+| Red alert: "overpaid" or "paid on it afterwards" | A customer paid an old QR as well as the new one, or paid after the bill was cancelled. The money is in the wallet: refund them (from `wavecli`), or count it towards what they owe, then tap Done. |
+| "Lost track of the bill (server restarted)" | Bills live in WavePos's memory. After a restart, check `wavecli activity` to see which parts were paid before charging again. |
 | Page says `Locked` | The link is missing `?k=<key>`. Open the full link once and re-add it to the home screen. |
 | Funnel address doesn't load ("server not found") | A new Funnel name can take up to half an hour to reach public DNS. Check with `dig +short <name>.ts.net @1.1.1.1`. Once that prints an IP, toggle the tablet's Wi-Fi to clear its cached "not found". |
 | `waved` won't start: `$HOME is not defined` | systemd doesn't set `HOME` for root services. Add `Environment=HOME=/root` (as in `contrib/waved.service`). |

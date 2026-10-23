@@ -39,8 +39,7 @@
   #invoice { gap: 12px; }
   #invoice .big { height: 60px; }
   #qr { width: min(80vw, 52vh, 520px); aspect-ratio: 1; background: #fff;
-    border-radius: 16px; padding: 12px; }
-  #qr { cursor: pointer; }
+    border-radius: 16px; padding: 12px; cursor: pointer; }
   #inv-amount { font-size: 44px; font-weight: 700; }
   #paid { background: var(--ok); }
   #paid .tick { font-size: 160px; line-height: 1; }
@@ -50,9 +49,22 @@
     font-size: 13px; line-height: 1.35; text-align: center; }
   .notice.on { display: block; }
   #err { color: var(--bad); min-height: 24px; text-align: center; }
+
+  /* Staff alerts (overpaid or late payments) sit above every screen. */
+  #alerts { position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+    display: flex; flex-direction: column; gap: 6px; padding: 8px 16px; }
+  #alerts:empty { display: none; }
+  .alert { display: flex; gap: 12px; align-items: center; max-width: 640px;
+    margin: 0 auto; padding: 10px 14px; border-radius: 10px; background: var(--bad);
+    color: #fff; font-size: 15px; line-height: 1.35; }
+  .alert button { flex: none; padding: 8px 14px; border: 0; border-radius: 8px;
+    background: #fff; color: var(--bad); font-weight: 700; font-size: 15px; }
+  #paid-extra { color: #fff; font-weight: 700; font-size: 20px; text-align: center; }
 </style>
 </head>
 <body>
+
+<div id="alerts"></div>
 
 <section class="screen on" id="keypad">
   <div id="amount">$0.00</div>
@@ -73,9 +85,9 @@
   <div class="sub" id="inv-part"></div>
   <div id="inv-amount"></div>
   <div class="sub" id="inv-sats"></div>
-  <img id="qr" alt="Lightning invoice QR" title="Tap to copy the invoice">
-  <div class="sub" id="inv-state">Scan with any Lightning wallet · tap the QR to copy</div>
-  <button class="big" id="retry" hidden>Retry this payment</button>
+  <img id="qr" alt="Lightning invoice QR" title="Tap to copy the invoice" hidden>
+  <div class="sub" id="inv-state"></div>
+  <button class="big" id="retry" hidden>New QR for this payment</button>
   <button class="big ghost" id="cancel">Cancel</button>
 </section>
 
@@ -83,22 +95,37 @@
   <div class="tick">&#10003;</div>
   <h1>Paid</h1>
   <div class="sub" id="paid-amount" style="color:#eafff2"></div>
+  <div id="paid-extra"></div>
   <button class="big ghost" id="next">New sale</button>
 </section>
 
 <script>
-let cents = 0, rate = 0, currency = 'AUD', maxInvoiceSats = 50000;
-let deadline = 0, busy = false, invoice = '';
-// pollGen identifies the current status poll. Bumping it abandons the old
-// poll, including any check still in flight, so a late answer for an old
-// invoice can never count as a payment for the current one.
+// The server owns each bill: it splits it, creates every QR and watches every
+// QR it ever made. This page only shows what the server reports, so a reload
+// or a sleeping tablet resumes the bill where it was.
+let cents = 0, rate = 0, currency = 'AUD', maxInvoiceSats = 50000, busy = false;
+let bill = null, invoice = '';
+// pollGen identifies the current poll. Bumping it abandons the old one,
+// including a request still in flight.
 let pollGen = 0;
-// A bill too big for one invoice is split into parts paid one after another.
-let parts = [], part = 0, paidCents = 0;
+
 const $ = id => document.getElementById(id);
 const fmt = c => (c / 100).toLocaleString(undefined, { style: 'currency',
   currency, currencyDisplay: 'narrowSymbol',
   minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const STORE = 'wavepos_bill';
+const saveBill = id => { try { localStorage.setItem(STORE, id); } catch (e) {} };
+const loadBill = () => { try { return localStorage.getItem(STORE); } catch (e) { return null; } };
+const clearBill = () => { try { localStorage.removeItem(STORE); } catch (e) {} };
+
+async function api(path, body) {
+  const opts = body === undefined ? {} : { method: 'POST',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
+  const r = await fetch(path, opts);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(j.error || 'HTTP ' + r.status), { status: r.status });
+  return j;
+}
 
 function show(id) {
   document.querySelectorAll('.screen').forEach(s => s.classList.toggle('on', s.id === id));
@@ -111,27 +138,33 @@ function render() {
   $('charge').disabled = cents === 0 || busy;
 }
 
-async function loadRate() {
-  try {
-    const r = await fetch('/api/rate');
-    if (r.ok) {
-      const j = await r.json();
-      rate = j.btc_price;
-      currency = j.currency || currency;
-      maxInvoiceSats = j.max_invoice_sats || maxInvoiceSats;
-    }
-  } catch (e) {}
-  render();
+function renderNotices(list) {
+  const box = $('alerts');
+  box.replaceChildren();
+  for (const n of list || []) {
+    const row = document.createElement('div');
+    row.className = 'alert';
+    const text = document.createElement('div');
+    text.textContent = n.text;
+    const done = document.createElement('button');
+    done.textContent = 'Done';
+    done.addEventListener('click', async () => {
+      try { renderNotices((await api('/api/notice/ack?id=' + n.id, {})).notices); } catch (e) {}
+    });
+    row.append(text, done);
+    box.append(row);
+  }
 }
 
-// splitBill divides the bill into near-equal parts that each stay 10% under
-// the per-invoice limit, so a small price move can't push one over.
-function splitBill(total) {
-  const limit = maxInvoiceSats * 0.9;
-  const sats = total / 100 / rate * 1e8;
-  const n = Math.max(1, Math.ceil(sats / limit));
-  const base = Math.floor(total / n), extra = total % n;
-  return Array.from({ length: n }, (_, i) => base + (i < extra ? 1 : 0));
+async function loadRate() {
+  try {
+    const j = await api('/api/rate');
+    rate = j.btc_price;
+    currency = j.currency || currency;
+    maxInvoiceSats = j.max_invoice_sats || maxInvoiceSats;
+    renderNotices(j.notices);
+  } catch (e) {}
+  render();
 }
 
 document.querySelector('.keys').addEventListener('click', e => {
@@ -146,99 +179,119 @@ document.querySelector('.keys').addEventListener('click', e => {
 
 $('charge').addEventListener('click', async () => {
   busy = true; render();
-  if (!rate) await loadRate();
-  if (!rate) {
-    $('err').textContent = `No BTC/${currency} rate, check the connection`;
+  try {
+    const v = await api('/api/bill/new', { cents });
+    saveBill(v.id);
+    showBill(v);
+    startPoll(v.id);
+  } catch (e) {
+    $('err').textContent = e.message;
+  } finally {
     busy = false; render();
-    return;
   }
-  parts = splitBill(cents); part = 0; paidCents = 0;
-  const ok = await startPart();
-  busy = false; render();
-  if (ok) show('invoice');
 });
 
-// startPart creates the invoice for the current part and starts polling.
-async function startPart() {
-  const amt = parts[part];
-  $('retry').hidden = true;
-  try {
-    const r = await fetch('/api/invoice', { method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cents: amt,
-        remaining_cents: parts.slice(part).reduce((a, b) => a + b, 0) }) });
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error || 'failed');
-    const split = parts.length > 1;
-    $('inv-notice').classList.toggle('on', split);
-    $('inv-notice').textContent = split
-      ? `This POS uses the latest Lightning network system. It's a beta ` +
-        `version and can only accept ${maxInvoiceSats.toLocaleString()} sats ` +
-        `per payment, so your bill is split into ${parts.length} payments. Sorry!`
-      : '';
-    $('inv-part').textContent = split
-      ? `Payment ${part + 1} of ${parts.length}` +
-        (paidCents ? ` · ${fmt(paidCents)} paid so far` : '')
-      : '';
-    $('inv-amount').textContent = fmt(amt) + ' ' + currency;
-    $('inv-sats').textContent = j.sats.toLocaleString() + ' sats';
-    $('qr').src = j.qr;
-    invoice = j.invoice;
-    $('inv-state').textContent = 'Scan with any Lightning wallet · tap the QR to copy';
-    deadline = Date.now() + 15 * 60 * 1000;
-    startPoll(j.id);
-    return true;
-  } catch (e) {
-    // Mid-bill the invoice screen is showing, so report the error there and
-    // let staff retry this part without losing what's already been paid.
-    $('err').textContent = e.message;
-    $('inv-state').textContent = e.message;
-    $('retry').hidden = false;
-    return false;
+// showBill draws the invoice or paid screen from the server's view of a bill.
+function showBill(v) {
+  bill = v;
+  renderNotices(v.notices);
+  if (v.state === 'paid') {
+    stopPoll(); clearBill();
+    $('paid-amount').textContent = fmt(v.total_cents) + ' ' + currency;
+    $('paid-extra').textContent = v.extra_cents
+      ? `Customer overpaid ${fmt(v.extra_cents)}. Refund them.` : '';
+    show('paid');
+    return;
   }
+  if (v.state === 'cancelled') {
+    stopPoll(); clearBill(); reset();
+    return;
+  }
+
+  const split = v.parts > 1;
+  $('inv-notice').classList.toggle('on', split);
+  $('inv-notice').textContent = split
+    ? `This POS uses the latest Lightning network system. It's a beta ` +
+      `version and can only accept ${maxInvoiceSats.toLocaleString()} sats ` +
+      `per payment, so your bill is split into ${v.parts} payments. Sorry!`
+    : '';
+  $('inv-part').textContent = split
+    ? `Payment ${v.part} of ${v.parts}` +
+      (v.paid_cents ? ` · ${fmt(v.paid_cents)} paid so far` : '')
+    : '';
+
+  const c = v.current;
+  $('qr').hidden = !c;
+  if (c) {
+    if (c.invoice !== invoice) { $('qr').src = c.qr; invoice = c.invoice; }
+    $('inv-amount').textContent = fmt(c.cents) + ' ' + currency;
+    $('inv-sats').textContent = c.sats.toLocaleString() + ' sats';
+  } else {
+    invoice = '';
+    $('inv-amount').textContent = fmt(v.total_cents - v.paid_cents) + ' ' + currency;
+    $('inv-sats').textContent = 'left to pay';
+  }
+  if (!$('inv-state').dataset.flash) {
+    $('inv-state').textContent = v.error
+      || (c ? 'Scan with any Lightning wallet · tap the QR to copy'
+            : v.can_retry ? 'This QR has expired' : 'Paid ✓ — next QR coming…');
+  }
+  $('retry').hidden = !v.can_retry;
+  show('invoice');
 }
 
-// startPoll checks the invoice one request at a time until it settles.
+// startPoll asks the server about the bill, one request at a time.
 function startPoll(id) {
   const gen = ++pollGen;
   const tick = async () => {
     if (gen !== pollGen) return;
-    if (Date.now() > deadline) {
-      stopPoll();
-      $('inv-state').textContent = 'Invoice expired';
-      $('retry').hidden = false;
-      return;
-    }
-    let s = null;
     try {
-      const r = await fetch('/api/status?id=' + encodeURIComponent(id));
-      if (r.ok) s = (await r.json()).status;
-    } catch (e) {}
-    if (gen !== pollGen) return; // cancelled or moved on while waiting
-
-    if (s === 'paid') {
-      stopPoll();
-      paidCents += parts[part];
-      part++;
-      if (part < parts.length) {
-        $('inv-state').textContent = 'Paid ✓ — next QR coming…';
-        await startPart();
-      } else {
-        $('paid-amount').textContent = fmt(cents) + ' ' + currency;
-        show('paid');
+      const v = await api('/api/bill?id=' + encodeURIComponent(id));
+      if (gen !== pollGen) return;
+      showBill(v);
+    } catch (e) {
+      if (gen !== pollGen) return;
+      if (e.status === 404) {
+        // The server restarted and forgot the bill.
+        stopPoll(); clearBill(); reset();
+        $('err').textContent = 'Lost track of the bill (server restarted). ' +
+          'Check the wallet activity before charging again.';
+        return;
       }
-    } else if (s === 'failed') {
-      stopPoll();
-      $('inv-state').textContent = 'Payment failed';
-      $('retry').hidden = false;
-    } else {
-      setTimeout(tick, 1500);
     }
+    setTimeout(tick, 1500);
   };
   setTimeout(tick, 1500);
 }
 
 function stopPoll() { pollGen++; }
+
+$('retry').addEventListener('click', async () => {
+  if (!bill) return;
+  $('retry').disabled = true;
+  try {
+    showBill(await api('/api/bill/retry?id=' + bill.id, {}));
+  } catch (e) {
+    $('inv-state').textContent = e.message;
+  } finally {
+    $('retry').disabled = false;
+  }
+});
+
+$('cancel').addEventListener('click', async () => {
+  if (!bill) { reset(); return; }
+  if (bill.paid_cents && !confirm(
+    `${fmt(bill.paid_cents)} of this bill is already paid. Cancel the rest?`)) return;
+  stopPoll();
+  let v = bill;
+  try { v = await api('/api/bill/cancel?id=' + bill.id, {}); } catch (e) {}
+  clearBill(); reset();
+  if (v.paid_cents) {
+    $('err').textContent = `Cancelled: ${fmt(v.paid_cents)} paid, ` +
+      `${fmt(v.total_cents - v.paid_cents)} still owed.`;
+  }
+});
+$('next').addEventListener('click', reset);
 
 // copyInvoice puts the invoice on the clipboard. navigator.clipboard needs
 // HTTPS, so plain-HTTP LAN access falls back to a hidden textarea.
@@ -257,27 +310,31 @@ async function copyInvoice() {
     try { ok = document.execCommand('copy'); } catch (e2) {}
     t.remove();
   }
-  const state = $('inv-state'), was = state.textContent;
-  const msg = ok ? 'Invoice copied ✓' : 'Copy failed — scan the QR instead';
-  state.textContent = msg;
-  setTimeout(() => { if (state.textContent === msg) state.textContent = was; }, 2000);
+  const state = $('inv-state');
+  state.dataset.flash = '1';
+  state.textContent = ok ? 'Invoice copied ✓' : 'Copy failed — scan the QR instead';
+  setTimeout(() => { delete state.dataset.flash; if (bill) showBill(bill); }, 2000);
 }
 $('qr').addEventListener('click', copyInvoice);
-$('retry').addEventListener('click', startPart);
 
 function reset() {
-  stopPoll(); cents = 0; parts = []; paidCents = 0; invoice = '';
-  $('retry').hidden = true;
+  stopPoll(); bill = null; invoice = ''; cents = 0;
+  $('err').textContent = '';
   render(); show('keypad');
 }
-$('cancel').addEventListener('click', () => {
-  if (paidCents && !confirm(`${fmt(paidCents)} of this bill is already paid. Cancel the rest?`)) return;
-  reset();
-});
-$('next').addEventListener('click', reset);
+
+// Resume a bill that was open when the page was last closed.
+(async () => {
+  const id = loadBill();
+  if (!id) return;
+  try {
+    const v = await api('/api/bill?id=' + encodeURIComponent(id));
+    if (v.state === 'open') { showBill(v); startPoll(id); } else clearBill();
+  } catch (e) { clearBill(); }
+})();
 
 loadRate();
-setInterval(loadRate, 60000);
+setInterval(loadRate, 30000);
 </script>
 </body>
 </html>
