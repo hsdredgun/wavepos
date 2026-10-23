@@ -9,8 +9,8 @@ and the screen goes green when it's paid. There are no Lightning channels to
 open, no inbound liquidity to manage, and no domain to buy.
 
 <p>
-  <img src="docs/keypad.jpg" alt="WavePos keypad" width="400">
-  <img src="docs/invoice.jpg" alt="WavePos invoice QR" width="400">
+  <img src="docs/keypad.jpg" alt="WavePos keypad" height="320">
+  <img src="docs/invoice.jpg" alt="WavePos invoice QR" height="320">
 </p>
 
 > [!WARNING]
