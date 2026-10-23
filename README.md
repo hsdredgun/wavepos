@@ -8,12 +8,42 @@ Punch in an amount in your local currency, the customer scans a Lightning QR,
 and the screen goes green when it's paid. There are no Lightning channels to
 open, no inbound liquidity to manage, and no domain to buy.
 
-<img src="docs/keypad.jpg" alt="WavePos keypad" width="420">
+<p>
+  <img src="docs/keypad.jpg" alt="WavePos keypad" width="400">
+  <img src="docs/invoice.jpg" alt="WavePos invoice QR" width="400">
+</p>
 
 > [!WARNING]
 > **Beta software on top of beta software.** Wavelength mainnet is
 > invite-only and still changing. Treat this as a "we also accept Bitcoin"
 > option, sweep often, and don't keep more on it than you can afford to lose.
+
+## Quick start
+
+You need a [Wavelength](https://wavelength.lightning.engineering/) `waved`
+already running on mainnet on the same machine (see
+[step 1](#1-run-wavelength-on-mainnet)). Then:
+
+```sh
+# Download the binary (use wavepos-linux-arm64 on a Raspberry Pi)
+curl -fLo /usr/local/bin/wavepos \
+  https://github.com/hsdredgun/wavepos/releases/latest/download/wavepos-linux-amd64
+chmod 755 /usr/local/bin/wavepos
+
+# Give it a macaroon that can create invoices but never spend
+wavecli bakemacaroon \
+  uri:/wavewalletrpc.WalletService/Recv \
+  uri:/wavewalletrpc.WalletService/Status \
+  uri:/wavewalletrpc.WalletInspectionService/InspectActivity \
+  --save-to /root/.waved/pos.macaroon
+
+# Run it and open http://<this-machine>:8080 on a tablet
+wavepos -listen :8080 -macaroon /root/.waved/pos.macaroon -currency AUD
+```
+
+That's enough to try it on your home network. For a real counter, read the
+full setup below: systemd, the shop key, a public HTTPS address with Tailscale
+Funnel, and the auto-sweep to cold storage.
 
 ## How it works
 
@@ -46,9 +76,9 @@ Check yours with `wavecli getinfo` → `server_info`.
 When the operator raises the limits, change `-max-invoice-sats` and
 `-max-balance-sats`.
 
-## Setup
+## Full setup
 
-These steps assume Linux with systemd, Go 1.22+ and `jq`.
+These steps assume Linux with systemd and `jq` (for the sweep script).
 
 ### 1. Run Wavelength on mainnet
 
@@ -78,12 +108,21 @@ wavecli bakemacaroon \
 chmod 600 /root/.waved/pos.macaroon
 ```
 
-### 3. Build and install
+### 3. Install
+
+Download a prebuilt binary from
+[Releases](https://github.com/hsdredgun/wavepos/releases) (Linux amd64 and
+arm64, checksums in `SHA256SUMS`), as in the quick start. You also want the
+repo for the `contrib/` files:
 
 ```sh
 git clone https://github.com/hsdredgun/wavepos && cd wavepos
-go build -o wavepos .
-install -m 755 wavepos /usr/local/bin/wavepos
+```
+
+Or build it yourself with Go 1.22+:
+
+```sh
+go build -o wavepos . && install -m 755 wavepos /usr/local/bin/wavepos
 ```
 
 ### 4. Shop key (optional, recommended)
