@@ -143,7 +143,22 @@ cp contrib/wavepos.service /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now wavepos
 ```
 
-Flags:
+#### Changing settings
+
+Settings are flags on the `ExecStart=` line of
+`/etc/systemd/system/wavepos.service`. A flag you leave out uses its
+default. For example, to take US dollars instead of Australian dollars,
+change `-currency AUD` to `-currency USD`:
+
+```sh
+nano /etc/systemd/system/wavepos.service   # edit the ExecStart= line
+systemctl daemon-reload && systemctl restart wavepos
+```
+
+To put your shop name in the invoice memo, add a line such as
+`-memo "Joe's Coffee" \` the same way.
+
+All flags:
 
 | Flag | Default | |
 |---|---|---|
