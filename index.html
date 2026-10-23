@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>WavePos</title>
+<style>
+  :root {
+    --bg: #111418; --panel: #1b2027; --key: #252b34; --key-hi: #313946;
+    --text: #f2f4f7; --muted: #8a94a3; --accent: #f7931a; --ok: #1fb46a;
+    --bad: #d9443a;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font-family: -apple-system, system-ui, sans-serif; touch-action: manipulation;
+    user-select: none; -webkit-user-select: none; }
+  .screen { display: none; height: 100%; flex-direction: column; align-items: center;
+    justify-content: center; padding: 24px 16px; gap: 20px; }
+  .screen.on { display: flex; }
+
+  #amount { font-size: clamp(56px, 12vw, 104px); font-weight: 700;
+    font-variant-numeric: tabular-nums; }
+  #sats, .sub { color: var(--muted); font-size: 22px; min-height: 28px; text-align: center; }
+  .keys { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
+    width: min(100%, 460px); }
+  .keys button { height: clamp(64px, 11vh, 96px); font-size: 34px; border: 0;
+    border-radius: 14px; background: var(--key); color: var(--text); }
+  .keys button:active { background: var(--key-hi); }
+  .keys .fn { color: var(--muted); font-size: 26px; }
+  .big { width: min(100%, 460px); height: 76px; font-size: 28px; font-weight: 700;
+    border: 0; border-radius: 14px; background: var(--accent); color: #111; }
+  .big:disabled { opacity: .35; }
+  .big.ghost { background: var(--key); color: var(--text); }
+
+  #invoice { gap: 12px; }
+  #invoice .big { height: 60px; }
+  #qr { width: min(80vw, 52vh, 520px); aspect-ratio: 1; background: #fff;
+    border-radius: 16px; padding: 12px; }
+  #inv-amount { font-size: 44px; font-weight: 700; }
+  #paid { background: var(--ok); }
+  #paid .tick { font-size: 160px; line-height: 1; }
+  #paid h1 { font-size: 56px; margin: 0; }
+  .notice { display: none; max-width: 460px; padding: 6px 12px; border-radius: 10px;
+    background: #2a2213; border: 1px solid var(--accent); color: #f5d9b0;
+    font-size: 13px; line-height: 1.35; text-align: center; }
+  .notice.on { display: block; }
+  #err { color: var(--bad); min-height: 24px; text-align: center; }
+</style>
+</head>
+<body>
+
+<section class="screen on" id="keypad">
+  <div id="amount">$0.00</div>
+  <div id="sats"></div>
+  <div class="keys">
+    <button data-k="1">1</button><button data-k="2">2</button><button data-k="3">3</button>
+    <button data-k="4">4</button><button data-k="5">5</button><button data-k="6">6</button>
+    <button data-k="7">7</button><button data-k="8">8</button><button data-k="9">9</button>
+    <button data-k="C" class="fn">C</button><button data-k="0">0</button>
+    <button data-k="B" class="fn">&#9003;</button>
+  </div>
+  <button class="big" id="charge" disabled>Charge</button>
+  <div id="err"></div>
+</section>
+
+<section class="screen" id="invoice">
+  <div class="notice" id="inv-notice"></div>
+  <div class="sub" id="inv-part"></div>
+  <div id="inv-amount"></div>
+  <div class="sub" id="inv-sats"></div>
+  <img id="qr" alt="Lightning invoice QR">
+  <div class="sub" id="inv-state">Scan with any Lightning wallet</div>
+  <button class="big ghost" id="cancel">Cancel</button>
+</section>
+
+<section class="screen" id="paid">
+  <div class="tick">&#10003;</div>
+  <h1>Paid</h1>
+  <div class="sub" id="paid-amount" style="color:#eafff2"></div>
+  <button class="big ghost" id="next">New sale</button>
+</section>
+
+<script>
+let cents = 0, rate = 0, currency = 'AUD', maxInvoiceSats = 50000;
+let poll = null, deadline = 0, busy = false;
+// A bill too big for one invoice is split into parts paid one after another.
+let parts = [], part = 0, paidCents = 0;
+const $ = id => document.getElementById(id);
+const fmt = c => (c / 100).toLocaleString(undefined, { style: 'currency',
+  currency, currencyDisplay: 'narrowSymbol',
+  minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+function show(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.toggle('on', s.id === id));
+}
+
+function render() {
+  $('amount').textContent = fmt(cents);
+  $('sats').textContent = rate && cents
+    ? '≈ ' + Math.round(cents / 100 / rate * 1e8).toLocaleString() + ' sats' : '';
+  $('charge').disabled = cents === 0 || busy;
+}
+
+async function loadRate() {
+  try {
+    const r = await fetch('/api/rate');
+    if (r.ok) {
+      const j = await r.json();
+      rate = j.btc_price;
+      currency = j.currency || currency;
+      maxInvoiceSats = j.max_invoice_sats || maxInvoiceSats;
+    }
+  } catch (e) {}
+  render();
+}
+
+// splitBill divides the bill into near-equal parts that each stay 10% under
+// the per-invoice limit, so a small price move can't push one over.
+function splitBill(total) {
+  const limit = maxInvoiceSats * 0.9;
+  const sats = total / 100 / rate * 1e8;
+  const n = Math.max(1, Math.ceil(sats / limit));
+  const base = Math.floor(total / n), extra = total % n;
+  return Array.from({ length: n }, (_, i) => base + (i < extra ? 1 : 0));
+}
+
+document.querySelector('.keys').addEventListener('click', e => {
+  const k = e.target.dataset.k;
+  if (!k) return;
+  $('err').textContent = '';
+  if (k === 'C') cents = 0;
+  else if (k === 'B') cents = Math.floor(cents / 10);
+  else if (cents < 1e7) cents = cents * 10 + Number(k);
+  render();
+});
+
+$('charge').addEventListener('click', async () => {
+  busy = true; render();
+  if (!rate) await loadRate();
+  if (!rate) {
+    $('err').textContent = `No BTC/${currency} rate, check the connection`;
+    busy = false; render();
+    return;
+  }
+  parts = splitBill(cents); part = 0; paidCents = 0;
+  const ok = await startPart();
+  busy = false; render();
+  if (ok) show('invoice');
+});
+
+// startPart creates the invoice for the current part and starts polling.
+async function startPart() {
+  const amt = parts[part];
+  try {
+    const r = await fetch('/api/invoice', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cents: amt }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'failed');
+    const split = parts.length > 1;
+    $('inv-notice').classList.toggle('on', split);
+    $('inv-notice').textContent = split
+      ? `This POS uses the latest Lightning network system. It's a beta ` +
+        `version and can only accept ${maxInvoiceSats.toLocaleString()} sats ` +
+        `per payment, so your bill is split into ${parts.length} payments. Sorry!`
+      : '';
+    $('inv-part').textContent = split
+      ? `Payment ${part + 1} of ${parts.length}` +
+        (paidCents ? ` · ${fmt(paidCents)} paid so far` : '')
+      : '';
+    $('inv-amount').textContent = fmt(amt) + ' ' + currency;
+    $('inv-sats').textContent = j.sats.toLocaleString() + ' sats';
+    $('qr').src = j.qr;
+    $('inv-state').textContent = 'Scan with any Lightning wallet';
+    deadline = Date.now() + 15 * 60 * 1000;
+    startPoll(j.id);
+    return true;
+  } catch (e) {
+    // Mid-bill the invoice screen is showing, so report the error there.
+    $('err').textContent = e.message;
+    $('inv-state').textContent = e.message;
+    return false;
+  }
+}
+
+function startPoll(id) {
+  stopPoll();
+  poll = setInterval(async () => {
+    if (Date.now() > deadline) {
+      stopPoll();
+      $('inv-state').textContent = 'Invoice expired — cancel and try again';
+      return;
+    }
+    try {
+      const r = await fetch('/api/status?id=' + encodeURIComponent(id));
+      if (!r.ok) return;
+      const s = (await r.json()).status;
+      if (s === 'paid') {
+        stopPoll();
+        paidCents += parts[part];
+        part++;
+        if (part < parts.length) {
+          $('inv-state').textContent = 'Paid ✓ — next QR coming…';
+          if (!(await startPart())) return;
+        } else {
+          $('paid-amount').textContent = fmt(cents) + ' ' + currency;
+          show('paid');
+        }
+      } else if (s === 'failed') {
+        stopPoll();
+        $('inv-state').textContent = 'Payment failed — cancel and try again';
+      }
+    } catch (e) {}
+  }, 1500);
+}
+
+function stopPoll() { if (poll) clearInterval(poll); poll = null; }
+
+function reset() { stopPoll(); cents = 0; parts = []; paidCents = 0; render(); show('keypad'); }
+$('cancel').addEventListener('click', () => {
+  if (paidCents && !confirm(`${fmt(paidCents)} of this bill is already paid. Cancel the rest?`)) return;
+  reset();
+});
+$('next').addEventListener('click', reset);
+
+loadRate();
+setInterval(loadRate, 60000);
+</script>
+</body>
+</html>

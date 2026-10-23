@@ -1,0 +1,16 @@
+[Unit]
+Description=WavePos point-of-sale
+After=network-online.target waved.service
+Wants=network-online.target waved.service
+
+[Service]
+ExecStart=/usr/local/bin/wavepos \
+  -listen 127.0.0.1:8080 \
+  -macaroon /root/.waved/pos.macaroon \
+  -key-file /root/.wavepos-key \
+  -currency AUD
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
