@@ -167,6 +167,7 @@ All flags:
 | `-currency` | `AUD` | Any code Coinbase/Kraken quote against BTC (USD, EUR, GBP…) |
 | `-memo` | empty | Prefix for the invoice memo. Payers can read it, so leave it empty if you'd rather not name your shop |
 | `-key-file` | empty | Shop key file; empty leaves the POS unlocked |
+| `-icon` | empty | Your logo as a PNG (180×180 works best), shown in the browser tab and as the home-screen icon |
 | `-max-invoice-sats` | `50000` | Operator `max_vtxo_amount` |
 | `-max-balance-sats` | `300000` | Operator `max_user_balance` |
 | `-waved` | `http://127.0.0.1:10031` | `waved` REST gateway |

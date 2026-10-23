@@ -376,6 +376,8 @@ func main() {
 		"most the wallet may hold (operator max_user_balance)")
 	keyFile := flag.String("key-file", "",
 		"file holding the shop key; empty leaves the POS unlocked")
+	icon := flag.String("icon", "",
+		"PNG shown as the browser tab and home-screen icon (180x180 works best)")
 	flag.Parse()
 
 	if *macPath == "" {
@@ -402,6 +404,13 @@ func main() {
 	mux.HandleFunc("/api/rate", s.handleRate)
 	mux.HandleFunc("/api/invoice", s.handleInvoice)
 	mux.HandleFunc("/api/status", s.handleStatus)
+	mux.HandleFunc("/icon.png", func(w http.ResponseWriter, r *http.Request) {
+		if *icon == "" {
+			http.NotFound(w, r)
+			return
+		}
+		http.ServeFile(w, r, *icon)
+	})
 
 	var handler http.Handler = mux
 	if *keyFile != "" {
